@@ -7,3 +7,7 @@ README.md
 venv/
 *.egg-info/
 .pytest_cache/
+node_modules/
+package.json
+package-lock.json
+test_calib_ui.js

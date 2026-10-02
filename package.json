@@ -1,0 +1,12 @@
+{
+  "name": "led-mixing-bench",
+  "version": "1.0.0",
+  "private": true,
+  "description": "LED 混光配方台（FastAPI + 原生前端）；devDependencies 仅用于前端回归测试",
+  "scripts": {
+    "test:ui": "node test_calib_ui.js"
+  },
+  "devDependencies": {
+    "jsdom": "^24.1.3"
+  }
+}

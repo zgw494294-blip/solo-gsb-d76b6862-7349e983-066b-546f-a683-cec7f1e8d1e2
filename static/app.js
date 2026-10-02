@@ -41,6 +41,11 @@ let calibUnique = null;
 let calibSuggestion = null;
 // 标定请求序号：仅接受最新一次请求的响应（迟到响应不得恢复旧建议）
 let calibReqSeq = 0;
+// 标定输入代次：通道 ID、样本驱动、实测值、待填状态一经改变即 +1
+// （含样本增删、按建议追加、载入示例/生成示例）。在途请求发出时记录代次，
+// 响应到达时代次已变即丢弃；代次只增不减，即使把输入改回原值，
+// 迟到的旧响应（含 non_unique 旧建议）也永远不会被重新接纳。
+let calibEpoch = 0;
 // 调光路径：按通道 id 存起始驱动级（0～255），适应通道增删
 let pathStart = {};
 // 最近一次路径规划结果（服务端原样返回）
@@ -487,7 +492,14 @@ function validateCalibForm() {
   return [...new Set(errs)];
 }
 
+// 标定输入已变化：在途标定请求一并失效（代次 +1）。此后到达的旧响应
+// 一律按过期丢弃，不得恢复旧建议、也不得覆盖当前结果与提示。
+function invalidateCalibInFlight() {
+  calibEpoch += 1;
+}
+
 function clearCalibResult() {
+  invalidateCalibInFlight();
   calibUnique = null;
   calibSuggestion = null; // 通道 ID / 样本变化或重新提交后，旧补测建议一律失效
   $('#calib-result').hidden = true;
@@ -497,23 +509,12 @@ function clearCalibResult() {
   $('#calib-suggestion').hidden = true;
 }
 
-// 仅令补测建议失效（如通道 ID 改名时），保留已展示的唯一/不唯一结论本身
+// 仅令补测建议失效（如通道 ID 改名时），保留已展示的唯一/不唯一结论本身；
+// 同时使在途标定请求失效：通道 ID 已变，旧请求的响应不得再被接纳
 function invalidateCalibSuggestion() {
+  invalidateCalibInFlight();
   calibSuggestion = null;
   $('#calib-suggestion').hidden = true;
-}
-
-// 当前标定输入指纹（有序通道 ID + 各组驱动/实测）：通道 ID 或样本变化即改变，
-// 用于丢弃迟到的过期响应
-function calibFingerprint() {
-  const orderedIds = channels.map((c) => c.id);
-  return JSON.stringify({
-    ids: orderedIds,
-    samples: calibSamples.map((smp) => ({
-      drives: orderedIds.map((id) => smp.drives[id]),
-      measured: smp.measured.slice(),
-    })),
-  });
 }
 
 async function onCalibrate() {
@@ -527,7 +528,8 @@ async function onCalibrate() {
   }
   const btn = $('#calib-btn');
   const seq = ++calibReqSeq;
-  const fp = calibFingerprint();
+  // 捕获当前输入代次：在途期间任何标定输入变化都会使代次 +1
+  const epoch = calibEpoch;
   btn.disabled = true;
   btn.textContent = '反求中…';
   try {
@@ -544,8 +546,10 @@ async function onCalibrate() {
       }),
     });
     const data = await resp.json();
-    // 迟到响应：已有更新的请求，或通道 ID/样本已变化 → 丢弃，不得恢复旧建议
-    if (seq !== calibReqSeq || fp !== calibFingerprint()) return;
+    // 迟到/过期响应一律丢弃：已有更新的请求，或在途期间标定输入
+    // （通道 ID、样本驱动、实测值、待填状态）已变化。即使输入被改回原值，
+    // 代次也不会回退，旧响应不得恢复旧建议、不得覆盖当前结果与提示。
+    if (seq !== calibReqSeq || epoch !== calibEpoch) return;
     if (!resp.ok) {
       clearCalibResult();
       showBanner('error', '<strong>请求被拒绝：</strong><br>' +
@@ -554,10 +558,13 @@ async function onCalibrate() {
     }
     renderCalibResult(data, samples);
   } catch (e) {
-    if (seq !== calibReqSeq || fp !== calibFingerprint()) return;
+    // 过期请求的失败同样丢弃：不得清除/覆盖当前结果与提示
+    if (seq !== calibReqSeq || epoch !== calibEpoch) return;
     clearCalibResult();
     showBanner('error', `请求失败：${esc(e.message)}。请确认后端服务已启动。`);
   } finally {
+    // 按钮收尾：仅当没有更新的标定请求时才恢复按钮；
+    // 若已有新请求在途，按钮与结果都归新请求管理，此处不得改动
     if (seq === calibReqSeq) {
       btn.disabled = false;
       btn.textContent = '反求满档读数';
