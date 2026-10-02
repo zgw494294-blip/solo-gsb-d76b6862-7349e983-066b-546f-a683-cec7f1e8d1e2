@@ -41,6 +41,11 @@ let calibUnique = null;
 let calibSuggestion = null;
 // 标定请求序号：仅接受最新一次请求的响应（迟到响应不得恢复旧建议）
 let calibReqSeq = 0;
+// 标定输入世代号：通道 ID、样本驱动、实测值或实测待填状态一经改变即 +1
+// （在 clearCalibResult / invalidateCalibSuggestion 中递增）。世代号只增不减：
+// 即使随后把输入改回原值，在途请求的迟到响应也一律按过期丢弃，不会被重新接纳
+// （取代旧的“指纹比对”：指纹不含待填状态，且改回原值后会撞回提交时的值）。
+let calibInputEpoch = 0;
 // 调光路径：按通道 id 存起始驱动级（0～255），适应通道增删
 let pathStart = {};
 // 最近一次路径规划结果（服务端原样返回）
@@ -488,6 +493,8 @@ function validateCalibForm() {
 }
 
 function clearCalibResult() {
+  // 标定输入已变化（或结果不再可信）：世代号 +1，在途标定请求的响应一律按过期丢弃
+  calibInputEpoch += 1;
   calibUnique = null;
   calibSuggestion = null; // 通道 ID / 样本变化或重新提交后，旧补测建议一律失效
   $('#calib-result').hidden = true;
@@ -499,21 +506,9 @@ function clearCalibResult() {
 
 // 仅令补测建议失效（如通道 ID 改名时），保留已展示的唯一/不唯一结论本身
 function invalidateCalibSuggestion() {
+  calibInputEpoch += 1; // 通道 ID 已变：在途标定请求的响应同样按过期丢弃
   calibSuggestion = null;
   $('#calib-suggestion').hidden = true;
-}
-
-// 当前标定输入指纹（有序通道 ID + 各组驱动/实测）：通道 ID 或样本变化即改变，
-// 用于丢弃迟到的过期响应
-function calibFingerprint() {
-  const orderedIds = channels.map((c) => c.id);
-  return JSON.stringify({
-    ids: orderedIds,
-    samples: calibSamples.map((smp) => ({
-      drives: orderedIds.map((id) => smp.drives[id]),
-      measured: smp.measured.slice(),
-    })),
-  });
 }
 
 async function onCalibrate() {
@@ -527,7 +522,9 @@ async function onCalibrate() {
   }
   const btn = $('#calib-btn');
   const seq = ++calibReqSeq;
-  const fp = calibFingerprint();
+  // 提交瞬间的输入世代：此后通道 ID/样本驱动/实测值/待填状态任何变化
+  // （含改回原值）都会令本次响应过期
+  const epoch = calibInputEpoch;
   btn.disabled = true;
   btn.textContent = '反求中…';
   try {
@@ -544,8 +541,9 @@ async function onCalibrate() {
       }),
     });
     const data = await resp.json();
-    // 迟到响应：已有更新的请求，或通道 ID/样本已变化 → 丢弃，不得恢复旧建议
-    if (seq !== calibReqSeq || fp !== calibFingerprint()) return;
+    // 迟到响应：已有更新的请求，或提交后输入又变过（即使改回原值）→ 直接丢弃，
+    // 不得恢复旧建议，也不得覆盖当前提示
+    if (seq !== calibReqSeq || epoch !== calibInputEpoch) return;
     if (!resp.ok) {
       clearCalibResult();
       showBanner('error', '<strong>请求被拒绝：</strong><br>' +
@@ -554,10 +552,11 @@ async function onCalibrate() {
     }
     renderCalibResult(data, samples);
   } catch (e) {
-    if (seq !== calibReqSeq || fp !== calibFingerprint()) return;
+    if (seq !== calibReqSeq || epoch !== calibInputEpoch) return;
     clearCalibResult();
     showBanner('error', `请求失败：${esc(e.message)}。请确认后端服务已启动。`);
   } finally {
+    // 仅最新一次请求收尾时恢复按钮；过期请求不得改动新请求的按钮状态与结果
     if (seq === calibReqSeq) {
       btn.disabled = false;
       btn.textContent = '反求满档读数';
